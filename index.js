@@ -1,7 +1,8 @@
+var { URL } = require("url");
 var async = require("async");
-var request = require("request");
 var xml2js = require("xml2js");
 var http = require("http");
+var https = require("https");
 var querystring = require("querystring");
 var _ = require('lodash');
 var GoogleAuth = require("google-auth-library");
@@ -137,16 +138,20 @@ var GoogleSpreadsheet = function( ss_key, auth_id, options ){
           url += query;
         }
 
-        request( {
-          url: url,
+        var cracked = new URL(url);
+        var reqOpt = {
+          protocol: cracked.protocol,
+          host: cracked.hostname,
+          port: cracked.port,
+          path: cracked.pathname+cracked.search,
           method: method,
           headers: headers,
           gzip: options.gzip !== undefined ? options.gzip : true,
-          body: method == 'POST' || method == 'PUT' ? query_or_data : null
-        }, function(err, response, body){
-          if (err) {
-            return cb( err );
-          } else if( response.statusCode === 401 ) {
+          timeout: 30000
+        };
+        var postData = method == 'POST' || method == 'PUT' ? query_or_data : null;
+        var req = https.request(reqOpt, function(response){
+          if ( response.statusCode === 401 ) {
             return cb( new Error("Invalid authorization key."));
           } else if ( response.statusCode >= 400 ) {
             var message = _.isObject(body) ? JSON.stringify(body) : body.replace(/&quot;/g, '"');
@@ -154,33 +159,41 @@ var GoogleSpreadsheet = function( ss_key, auth_id, options ){
           } else if ( response.statusCode === 200 && response.headers['content-type'].indexOf('text/html') >= 0 ) {
             return cb( new Error("Sheet is private. Use authentication or make public. (see https://github.com/theoephraim/node-google-spreadsheet#a-note-on-authentication for details)"));
           }
-
-
-          if ( body ){
-            var xml_parser = new xml2js.Parser({
-              // options carried over from older version of xml2js
-              // might want to update how the code works, but for now this is fine
-              explicitArray: false,
-              explicitRoot: false
-            });
-            xml_parser.parseString(body, function(err, result){
-              if ( err ) {
-                xml_parser = null;
-                body = null;
-                return cb( err );
-              }
-              if(cb.length == 3) {
-                cb( null, result, body );
-              }else{
-                body = null;
-                cb( null, result );
-              }
-            });
-          } else {
-            if ( err ) cb( err );
-            else cb( null, true );
-          }
-        })
+          var body = Buffer.alloc(0);
+          response.on('data', chunk => {
+            body = Buffer.concat([body, chunk]);
+          });
+          response.on('end', () => {
+            body = body.toString('utf8');
+            if ( body ){
+              var xml_parser = new xml2js.Parser({
+                // options carried over from older version of xml2js
+                // might want to update how the code works, but for now this is fine
+                explicitArray: false,
+                explicitRoot: false
+              });
+              xml_parser.parseString(body, function(err, result){
+                if ( err ) {
+                  xml_parser = null;
+                  body = null;
+                  return cb( err );
+                }
+                if(cb.length == 3) {
+                  cb( null, result, body );
+                }else{
+                  body = null;
+                  cb( null, result );
+                }
+              });
+            } else {
+              cb( null, true );
+            }
+          });
+        });
+        req.on('error', err => cb(err) );
+        if (postData)
+          req.write(postData);
+        req.end();
       }
     });
   }
